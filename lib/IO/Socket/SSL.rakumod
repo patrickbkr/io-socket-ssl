@@ -25,6 +25,8 @@ has $.listen-socket;
 has $.accepted-socket;
 has $!socket;
 has OpenSSL $.ssl;
+has Bool $!closed = True;
+has Lock $!closed-lock .= new;
 
 method new(*%args is copy) {
     fail "Nothing given for new socket to connect or bind to" unless %args<host>
@@ -59,42 +61,52 @@ method new(*%args is copy) {
 
 method !initialize {
     if $!client-socket || ($!host && $!port) {
-        # client stuff
-        $!socket = $!client-socket || IO::Socket::INET.new(:host($!host), :port($!port));
+        $!closed-lock.protect: {
+            # client stuff
+            $!socket = $!client-socket || IO::Socket::INET.new(:host($!host), :port($!port));
 
-        # handle errors
-        $!ssl = OpenSSL.new(:client);
-        $!ssl.set-socket($!socket);
-        $!ssl.set-connect-state;
-        my $ret = $!ssl.connect;
-        if $ret < 0 {
-            my $e = OpenSSL::Err::ERR_get_error();
-            repeat {
-                say "err code: $e";
-                say OpenSSL::Err::ERR_error_string($e, Str);
-               $e = OpenSSL::Err::ERR_get_error();
-            } while $e != 0 && $e != 4294967296;
+            # handle errors
+            $!ssl = OpenSSL.new(:client);
+            $!ssl.set-socket($!socket);
+            $!ssl.set-connect-state;
+            my $ret = $!ssl.connect;
+            if $ret < 0 {
+                my $e = OpenSSL::Err::ERR_get_error();
+                repeat {
+                    say "err code: $e";
+                    say OpenSSL::Err::ERR_error_string($e, Str);
+                   $e = OpenSSL::Err::ERR_get_error();
+                } while $e != 0 && $e != 4294967296;
+            }
+            else {
+                $!closed = False;
+            }
         }
     }
     elsif $!accepted-socket {
-        $!socket = $!accepted-socket;
-        
-        $!ssl = OpenSSL.new();
-        $!ssl.set-socket($!socket);
-        $!ssl.set-accept-state;
-        
-        $!ssl.use-certificate-file($!certfile);
-        $!ssl.use-privatekey-file($!certfile);
-        $!ssl.check-private-key;
-        
-        my $ret = $!ssl.accept;
-        if $ret < 0 {
-            my $e = OpenSSL::Err::ERR_get_error();
-            repeat {
-                say "err code: $e";
-                say OpenSSL::Err::ERR_error_string($e);
-               $e = OpenSSL::Err::ERR_get_error();
-            } while $e != 0 && $e != 4294967296;
+        $!closed-lock.protect: {
+            $!socket = $!accepted-socket;
+
+            $!ssl = OpenSSL.new();
+            $!ssl.set-socket($!socket);
+            $!ssl.set-accept-state;
+
+            $!ssl.use-certificate-file($!certfile);
+            $!ssl.use-privatekey-file($!certfile);
+            $!ssl.check-private-key;
+
+            my $ret = $!ssl.accept;
+            if $ret < 0 {
+                my $e = OpenSSL::Err::ERR_get_error();
+                repeat {
+                    say "err code: $e";
+                    say OpenSSL::Err::ERR_error_string($e);
+                   $e = OpenSSL::Err::ERR_get_error();
+                } while $e != 0 && $e != 4294967296;
+            }
+            else {
+                $!closed = False;
+            }
         }
     }
     elsif $!listen-socket || $!listening {
@@ -157,8 +169,14 @@ method accept {
 }
 
 method close {
-    $!ssl.close;
-    $!socket.close;
+    $!closed-lock.protect: {
+        unless $!closed {
+            $!closed = True;
+            $!ssl.close;
+            $!socket.close;
+        }
+    }
+
 }
 
 method connect(Str() $host, Int() $port) {
